@@ -1,0 +1,78 @@
+{
+  "name": "memory-api-server",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "nodemon src/index.ts",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "db:deploy": "npx prisma migrate deploy && npx prisma generate",
+    "db:seed": "node -r ts-node/register prisma/seed.ts",
+    "test": "vitest run",
+    "format": "prettier --write \"src/**/*.{ts,js,json}\"",
+    "migrate:re-embed": "node -r ts-node/register scripts/re-embed-all.ts",
+    "test:watch": "vitest",
+    "prune:memories": "node dist/scripts/pruneMemories.js",
+    "prune:memories:dev": "ts-node src/scripts/pruneMemories.ts"
+  },
+  "keywords": [
+    "llm",
+    "memory",
+    "rag",
+    "pgvector",
+    "embeddings",
+    "kubernetes"
+  ],
+  "author": "",
+  "license": "Elastic-2.0",
+  "description": "pgvector-backed memory retrieval service for the bouc.io AI assistant platform.",
+  "dependencies": {
+    "@opentelemetry/auto-instrumentations-node": "^0.76.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.218.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
+    "@opentelemetry/sdk-metrics": "^2.7.1",
+    "@opentelemetry/sdk-node": "^0.218.0",
+    "@prisma/client": "^6.10.1",
+    "axios": "^1.10.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.0.1",
+    "helmet": "^8.2.0",
+    "jsonwebtoken": "^9.0.2",
+    "pino": "^9.4.0",
+    "prom-client": "^15.1.3",
+    "swagger-jsdoc": "^6.3.0",
+    "swagger-ui-express": "^5.0.1",
+    "zod": "^3.22.4"
+  },
+  "ts-node": {
+    "esm": false,
+    "transpileOnly": true
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^24.0.14",
+    "@types/swagger-jsdoc": "^6.0.4",
+    "@types/swagger-ui-express": "^4.1.8",
+    "nodemon": "^3.1.10",
+    "prettier": "^3.6.2",
+    "prisma": "^6.10.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.7"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://gitlab.com/bouc-io/application/memory/memory-api-server.git"
+  }
+}

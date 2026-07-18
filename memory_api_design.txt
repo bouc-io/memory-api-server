@@ -1,0 +1,779 @@
+#### Memory Retrieval Strategy
+
+When processing a new message in an assignment:
+
+1. **Check assignment settings** for memory configuration
+2. **Extract context** from the current message and recent conversation
+3. **Retrieve memories** using this priority system:
+
+**Priority 1: Critical Importance**
+- Always include ALL active `critical` memories (persona, core instructions)
+- These define fundamental behavior and must always be present
+
+**Priority 2: High Relevance + High Importance**
+- Semantic search with `min_relevance: 0.8`
+- Filter by `importance: high`
+- Include top 2-3 results
+
+**Priority 3: Fill Remaining Slots**
+- Continue semantic search for medium/low importance
+- Fill up to `max_memories` limit (e.g., 5 total)
+
+#### Authentication
+All endpoints require a JWT Bearer token in the `Authorization` header.
+The `user_id` is derived from the `preferred_username` claim in the token.
+
+**Example retrieval logic:**
+```python
+def retrieve_memories(context, user_id, max_memories=5):
+    # Step 1: Get all critical memories
+    critical = db.query(
+        user_id=user_id,
+        importance='critical',
+        is_active=True
+    )
+    
+    results = list(critical)
+    remaining_slots = max_memories - len(results)
+    
+    if remaining_slots > 0:
+        # Step 2: Semantic search for high importance
+        context_embedding = generate_embedding(context)
+        high_relevant = vector_db.search(
+            embedding=context_embedding,
+            filter={
+                'user_id': user_id,
+                'importance': 'high',
+                'is_active': True
+            },
+            limit=remaining_slots,
+            min_score=0.8
+        )
+        results.extend(high_relevant)
+        remaining_slots -= len(high_relevant)
+    
+    if remaining_slots > 0:
+        # Step 3: Fill with medium/low importance
+        medium_low = vector_db.search(
+            embedding=context_embedding,
+            filter={
+                'user_id': user_id,
+                'importance': ['medium', 'low'],
+                'is_active': True
+            },
+            limit=remaining_slots,
+            min_score=0.75
+        )
+        results.extend(medium_low)
+    
+    # Log access for analytics
+    for memory in results:
+        log_memory_access(memory.id, assignment_id)
+    
+    return results
+```
+
+4. **Inject into system prompt** with clear formatting:
+```
+You have access to the following memories about this user:
+
+PERSONA:
+- Act as a senior developer mentor, providing constructive feedback and explaining the reasoning behind suggestions.
+
+PREFERENCES:
+- User prefers concise responses without excessive explanations unless specifically asked for details.
+
+FACTS:
+- User is a software engineer working primarily with React and TypeScript.
+
+INSTRUCTIONS:
+- When discussing code, always include TypeScript types and avoid using "any" type.
+
+Use these memories to personalize your responses while staying natural and conversational.
+```
+
+5. **Update access metrics** after each retrieval-- Core memories table
+CREATE TABLE memories (
+    id UUID PRIMARY KEY,
+    id UUID PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL, -- auth username from token
+    content TEXT NOT NULL,
+    category VARCHAR(50) NOT NULL,
+    importance VARCHAR(20) NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+    source VARCHAR(50) NOT NULL DEFAULT 'manual',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    access_count INT DEFAULT 0,
+    last_accessed_at TIMESTAMP,
+    metadata JSONB,
+    embedding_id VARCHAR(255),
+    CONSTRAINT valid_category CHECK (category IN (
+        'persona', 'preference', 'fact', 'context', 'instruction'
+    )),
+    CONSTRAINT valid_importance CHECK (importance IN (
+        'critical', 'high', 'medium', 'low'
+    )),
+    CONSTRAINT valid_source CHECK (source IN (
+        'manual', 'inferred', 'imported'
+    ))
+);
+
+-- Memory tags (many-to-many)
+CREATE TABLE memory_tags (
+    memory_id UUID REFERENCES memories(id) ON DELETE CASCADE,
+    tag VARCHAR(100),
+    PRIMARY KEY (memory_id, tag)
+);
+
+-- Memory sources (link to assignments/messages)
+CREATE TABLE memory_sources (
+    id UUID PRIMARY KEY,
+    memory_id UUID REFERENCES memories(id) ON DELETE CASCADE,
+    source_type VARCHAR(50), -- 'assignment', 'message', 'manual'
+    source_id UUID,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Memory extraction jobs
+CREATE TABLE memory_extractions (
+    id UUID PRIMARY KEY,
+    assignment_id UUID REFERENCES assignments(id),
+    status VARCHAR(50),
+    extracted_count INT,
+    saved_count INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW(),
+    completed_at TIMESTAMP,
+    metadata JSONB
+);
+
+-- Extracted memory candidates (before user review)
+CREATE TABLE extraction_candidates (
+    id UUID PRIMARY KEY,
+    extraction_id UUID REFERENCES memory_extractions(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    category VARCHAR(50) NOT NULL,
+    importance VARCHAR(20) NOT NULL,
+    confidence FLOAT NOT NULL,
+    suggested_tags TEXT[],
+    source_message_ids UUID[],
+    saved BOOLEAN DEFAULT FALSE,
+    memory_id UUID REFERENCES memories(id),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Memory access log (for analytics)
+CREATE TABLE memory_access_log (
+    id UUID PRIMARY KEY,
+    memory_id UUID REFERENCES memories(id) ON DELETE CASCADE,
+    assignment_id UUID REFERENCES assignments(id),
+    relevance_score FLOAT,
+    accessed_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Indexes for performance
+CREATE INDEX idx_memories_user_category ON memories(user_id, category);
+CREATE INDEX idx_memories_user_importance ON memories(user_id, importance);
+CREATE INDEX idx_memories_user_active ON memories(user_id, is_active);
+CREATE INDEX idx_memories_created_at ON memories(created_at DESC);
+CREATE INDEX idx_memories_updated_at ON memories(updated_at DESC);
+CREATE INDEX idx_memories_embedding ON memories(embedding_id);
+CREATE INDEX idx_memory_tags_tag ON memory_tags(tag);
+CREATE INDEX idx_memory_sources_source ON memory_sources(source_type, source_id);
+CREATE INDEX idx_extractions_assignment ON memory_extractions(assignment_id);
+CREATE INDEX idx_extraction_candidates_extraction ON extraction_candidates(extraction_id);
+CREATE INDEX idx_memory_access_memory ON memory_access_log(memory_id, accessed_at DESC);#### Get memory statistics
+```
+GET /v1/memories/stats
+```
+**Response:**
+```json
+{
+  "total_memories": 147,
+  "active_memories": 134,
+  "inactive_memories": 13,
+  "by_category": {
+    "persona": 8,
+    "preference": 45,
+    "fact": 52,
+    "context": 30,
+    "instruction": 12
+  },
+  "by_importance": {
+    "critical": 5,
+    "high": 38,
+    "medium": 67,
+    "low": 37
+  },
+  "by_source": {
+    "manual": 89,
+    "inferred": 52,
+    "imported": 6
+  },
+  "most_accessed": [
+    {
+      "memory_id": "uuid",
+      "content": "Act as a senior developer mentor...",
+      "category": "persona",
+      "importance": "critical",
+      "access_count": 245
+    }
+  ],
+  "recently_updated": [
+    {
+      "memory_id": "uuid",
+      "content": "User prefers concise responses...",
+      "updated_at": "2024-01-15T10:30:00Z"
+    }
+  ],
+  "storage_size_mb": 2.8
+}
+```#### Auto-inject memories into assignment
+```
+PATCH /v1/assignments/{assignment_id}/settings
+```
+**Request body:**
+```json
+{
+  "memory_settings": {
+    "auto_retrieve": true,
+    "max_memories": 5,
+    "min_relevance": 0.75,
+    "categories": ["persona", "instruction", "preference", "fact", "context"],
+    "min_importance": "medium",
+    "prioritize_critical": true
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "assignment_id": "uuid",
+  "memory_settings": {
+    "auto_retrieve": true,
+    "max_memories": 5,
+    "min_relevance": 0.75,
+    "categories": ["persona", "instruction", "preference", "fact", "context"],
+    "min_importance": "medium",
+    "prioritize_critical": true
+  },
+  "updated_at": "2024-01-15T15:00:00Z"
+}
+```
+
+**Priority order when `prioritize_critical` is true:**
+1. Critical importance memories (always included if relevant)
+2. High importance memories
+3. Medium/Low importance memories (fill remaining slots)#### Get relevant memories for current context
+```
+POST /v1/assignments/{assignment_id}/memories/retrieve
+```
+**Request body:**
+```json
+{
+  "context": "User is asking about building a React component with TypeScript",
+  "limit": 5,
+  "categories": ["persona", "instruction", "fact", "preference"],
+  "min_importance": "medium"
+}
+```
+
+**Response:**
+```json
+{
+  "memories": [
+    {
+      "memory_id": "uuid",
+      "content": "Act as a senior developer mentor, providing constructive feedback and explaining the reasoning behind suggestions.",
+      "category": "persona",
+      "importance": "critical",
+      "relevance_score": 0.88,
+      "reason": "Defines overall interaction style"
+    },
+    {
+      "memory_id": "uuid",
+      "content": "User is a software engineer working primarily with React and TypeScript.",
+      "category": "fact",
+      "importance": "high",
+      "relevance_score": 0.95,
+      "reason": "Directly relevant to current task"
+    },
+    {
+      "memory_id": "uuid",
+      "content": "When discussing code, always include TypeScript types and avoid using 'any' type.",
+      "category": "instruction",
+      "importance": "medium",
+      "relevance_score": 0.92,
+      "reason": "Specific instruction for code discussions"
+    },
+    {
+      "memory_id": "uuid",
+      "content": "User prefers concise responses without excessive explanations unless specifically asked for details.",
+      "category": "preference",
+      "importance": "high",
+      "relevance_score": 0.78,
+      "reason": "Communication style preference"
+    }
+  ],
+  "retrieval_strategy": "semantic_search",
+  "total_active_memories": 4
+}
+
+#### Delete memory
+```
+DELETE /v1/memories/{memory_id}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "memory_id": "uuid",
+  "deleted_at": "2024-01-15T14:55:00Z"
+}
+```#### Update memory
+```
+PATCH /v1/memories/{memory_id}
+```
+**Request body:**
+```json
+{
+  "is_active": true,
+  "content": "Updated memory content",
+  "category": "preference",
+  "importance": "high",
+  "tags": ["new", "tags"]
+}
+```
+API should accept any of the fields that are optional in the PATCH /v1/memories/{memory_id} endpoint.
+
+**Response:**
+```json
+{
+  "memory_id": "uuid",
+  "content": "Updated memory content",
+  "category": "preference",
+  "importance": "high",
+  "tags": ["new", "tags"],
+  "created_at": "2024-01-15T10:30:00Z",
+  "updated_at": "2024-01-15T14:45:00Z",
+  "access_count": 12,
+  "last_accessed_at": "2024-01-15T14:30:00Z",
+  "source": "manual"
+}
+```#### List all memories
+```
+GET /v1/memories
+```
+**Query params:**
+- `category` (string): Filter by category (persona, preference, fact, context, instruction)
+- `importance` (string): Filter by importance (critical, high, medium, low)
+- `tags` (string): Comma-separated tags
+- `search` (string): Full-text search in content
+- `source` (string): Filter by source type (manual, inferred, imported)
+- `limit` (int): Results per page (default: 50)
+- `offset` (int): Pagination offset
+- `sort` (string): Sort by field (default: "updated_at")
+- `order` (string): "asc" or "desc" (default: "desc")
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "memory_id": "uuid",
+      "content": "User prefers concise responses without excessive explanations unless specifically asked for details.",
+      "category": "preference",
+      "importance": "high",
+      "tags": ["communication", "style"],
+      "created_at": "2024-01-15T10:30:00Z",
+      "updated_at": "2024-01-15T10:30:00Z",
+      "access_count": 12,
+      "last_accessed_at": "2024-01-15T14:30:00Z",
+      "source": "manual"
+    },
+    {
+      "memory_id": "uuid",
+      "content": "Act as a senior developer mentor, providing constructive feedback and explaining the reasoning behind suggestions.",
+      "category": "persona",
+      "importance": "critical",
+      "tags": ["role", "mentoring"],
+      "created_at": "2024-01-14T15:20:00Z",
+      "updated_at": "2024-01-14T15:20:00Z",
+      "access_count": 45,
+      "last_accessed_at": "2024-01-15T14:25:00Z",
+      "source": "manual"
+    },
+    {
+      "memory_id": "uuid",
+      "content": "User is a software engineer working primarily with React and TypeScript.",
+      "category": "fact",
+      "importance": "high",
+      "tags": ["profession", "technical"],
+      "created_at": "2024-01-12T09:15:00Z",
+      "updated_at": "2024-01-12T09:15:00Z",
+      "access_count": 28,
+      "last_accessed_at": "2024-01-15T11:00:00Z",
+      "source": "inferred"
+    },
+    {
+      "memory_id": "uuid",
+      "content": "When discussing code, always include TypeScript types and avoid using 'any' type.",
+      "category": "instruction",
+      "importance": "medium",
+      "tags": ["code", "typescript"],
+      "created_at": "2024-01-08T16:45:00Z",
+      "updated_at": "2024-01-08T16:45:00Z",
+      "access_count": 18,
+      "last_accessed_at": "2024-01-15T13:20:00Z",
+      "source": "manual"
+    }
+  ],
+  "pagination": {
+    "limit": 50,
+    "offset": 0,
+    "total": 4
+  }
+}
+```#### Create memory
+```
+POST /v1/memories
+```
+**Request body:**
+```json
+{
+  "content": "Act as a senior developer mentor, providing constructive feedback and explaining the reasoning behind suggestions.",
+  "category": "persona",
+  "importance": "critical",
+  "tags": ["role", "mentoring"],
+  "metadata": {
+    "source_assignment_id": "uuid",
+    "source_message_id": "uuid",
+    "source_type": "manual"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "memory_id": "uuid",
+  "content": "Act as a senior developer mentor, providing constructive feedback and explaining the reasoning behind suggestions.",
+  "category": "persona",
+  "importance": "critical",
+  "tags": ["role", "mentoring"],
+  "created_at": "2024-01-14T15:20:00Z",
+  "updated_at": "2024-01-14T15:20:00Z",
+  "access_count": 0,
+  "last_accessed_at": null,
+  "source": "manual"
+}
+```
+
+**Category values:**
+- `persona`: Define the AI's role, personality, or behavior style
+- `preference`: User preferences, likes, dislikes, and communication style
+- `fact`: Factual information about the user (profession, technical stack, etc.)
+- `context`: Contextual information (current projects, work environment, team)
+- `instruction`: Standing instructions, rules, or guidelines to follow
+
+**Importance levels:**
+- `critical`: Must always be considered (e.g., core persona, safety rules)
+- `high`: Very important, prioritize in retrieval
+- `medium`: Useful context, include when relevant
+- `low`: Nice to have, include only if highly relevant
+
+**Source types:**
+- `manual`: User manually created
+- `inferred`: AI automatically extracted from conversation
+- `imported`: Imported from external source# AI Agent API Server Design
+
+---
+
+## Memory System
+
+The memory system enables the agent to retain and retrieve knowledge across assignments, creating a persistent knowledge base.
+
+### Memory Architecture
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   Assignment    │────▶│  Memory System   │────▶│ Vector Database │
+│   (Current)     │     │  (Extraction &   │     │   (Embeddings)  │
+│                 │     │   Retrieval)     │     │                 │
+└─────────────────┘     └──────────────────┘     └─────────────────┘
+                               │                          │
+                               ▼                          ▼
+                        ┌──────────────┐          ┌─────────────┐
+                        │  Graph Store │          │  Search API │
+                        │ (Relations)  │          │             │
+                        └──────────────┘          └─────────────┘
+```
+
+---
+
+### Memory Endpoints
+
+#### Get memory by ID
+```
+GET /v1/memories/{memory_id}
+```
+
+#### List all memories
+```
+GET /v1/memories
+```
+**Query params:**
+- `type` (string): Filter by memory type
+- `tags` (string): Comma-separated tags
+- `search` (string): Full-text search
+- `limit` (int): Results per page (default: 50)
+- `sort` (string): Sort by field (default: "created_at")
+- `order` (string): "asc" or "desc" (default: "desc")
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "memory_id": "uuid",
+      "content": "User prefers Python over JavaScript",
+      "type": "preference",
+      "tags": ["python", "preferences"],
+      "created_at": "2024-01-05T10:30:00Z",
+      "updated_at": "2024-01-05T10:30:00Z",
+      "access_count": 5,
+      "last_accessed_at": "2024-01-05T12:00:00Z",
+      "relevance_score": 0.95
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 50,
+    "total": 127
+  }
+}
+```
+
+### Semantic Search
+
+#### Search memories by similarity
+```
+POST /v1/memories/search
+```
+**Request body:**
+```json
+{
+  "query": "What programming languages does the user know?",
+  "limit": 10,
+  "min_relevance": 0.7,
+  "filters": {
+    "types": ["preference", "skill"],
+    "tags": ["programming"]
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "results": [
+    {
+      "memory_id": "uuid",
+      "content": "User is proficient in Python and JavaScript",
+      "type": "skill",
+      "relevance_score": 0.92,
+      "created_at": "2024-01-05T10:30:00Z",
+      "metadata": {
+        "source_assignment_id": "uuid"
+      }
+    },
+    {
+      "memory_id": "uuid",
+      "content": "User prefers Python for data analysis",
+      "type": "preference",
+      "relevance_score": 0.87,
+      "created_at": "2024-01-04T15:20:00Z"
+    }
+  ],
+  "query_embedding_id": "vec_uuid"
+}
+```
+
+---
+
+
+### Memory Collections
+
+Group related memories into collections for organization.
+
+#### Create collection
+```
+POST /v1/memories/collections
+```
+**Request body:**
+```json
+{
+  "name": "Work Preferences",
+  "description": "User's work-related preferences and context",
+  "memory_ids": ["uuid1", "uuid2"]
+}
+```
+
+#### List collections
+```
+GET /v1/memories/collections
+```
+
+#### Get collection with memories
+```
+GET /v1/memories/collections/{collection_id}
+```
+
+#### Add memories to collection
+```
+POST /v1/memories/collections/{collection_id}/memories
+```
+**Request body:**
+```json
+{
+  "memory_ids": ["uuid3", "uuid4"]
+}
+```
+
+---
+
+### Memory Relations
+
+Model relationships between memories (entity graph).
+
+#### Create relation
+```
+POST /v1/memories/relations
+```
+**Request body:**
+```json
+{
+  "source_memory_id": "uuid1",
+  "target_memory_id": "uuid2",
+  "relation_type": "related_to",
+  "metadata": {
+    "strength": 0.8,
+    "description": "Both relate to Python programming"
+  }
+}
+```
+
+**Relation types:**
+- `related_to`: General relation
+- `contradicts`: Conflicting information
+- `supersedes`: Newer info replaces old
+- `supports`: Reinforces another memory
+- `derives_from`: Inferred from another memory
+
+#### Get memory relations
+```
+GET /v1/memories/{memory_id}/relations
+```
+**Response:**
+```json
+{
+  "memory_id": "uuid",
+  "relations": [
+    {
+      "relation_id": "uuid",
+      "target_memory": {
+        "memory_id": "uuid2",
+        "content": "User knows pandas library"
+      },
+      "relation_type": "related_to",
+      "strength": 0.8
+    }
+  ]
+}
+```
+
+#### Get memory graph
+```
+GET /v1/memories/graph
+```
+**Query params:**
+- `root_memory_id` (string): Starting point
+- `depth` (int): How many hops (default: 2)
+- `relation_types` (string): Filter by types
+
+**Response:**
+```json
+{
+  "nodes": [
+    {
+      "memory_id": "uuid1",
+      "content": "User knows Python",
+      "type": "skill"
+    },
+    {
+      "memory_id": "uuid2",
+      "content": "User knows pandas",
+      "type": "skill"
+    }
+  ],
+  "edges": [
+    {
+      "source": "uuid1",
+      "target": "uuid2",
+      "relation_type": "related_to",
+      "strength": 0.8
+    }
+  ]
+}
+```
+
+---
+
+### Cross-Assignment Memory Integration
+
+#### Get memories from related assignments
+```
+GET /v1/assignments/{assignment_id}/related-memories
+```
+**Response:**
+```json
+{
+  "current_assignment_id": "uuid1",
+  "related_assignments": [
+    {
+      "assignment_id": "uuid2",
+      "title": "Data Analysis Project",
+      "relevance_score": 0.85,
+      "shared_memories": [
+        {
+          "memory_id": "uuid",
+          "content": "User prefers pandas for data manipulation",
+          "relevance_score": 0.92
+        }
+      ]
+    }
+  ]
+}
+```
+
+
+### Memory System Implementation Notes
+
+#### Vector Database Integration
+
+Use a vector database for semantic search:
+- **pgvector**: PostgreSQL extension
+
+
+#### Memory Retrieval Strategy
+
+When processing a new message in an assignment:
+
+1. **Extract context** from recent messages
+2. **Query vector DB** with context embedding
+3. **Filter and rank** by relevance + recency + access count
+4. **Inject top N memories** into system prompt
+5. **Log access** for analytics
+
