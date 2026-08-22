@@ -1,0 +1,207 @@
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+// -- Core memories table --
+model Memory {
+  id             String            @id @default(uuid()) @db.Uuid
+  userId         String            @map("user_id")
+  content        String
+  category       MemoryCategory
+  importance     MemoryImportance
+  isActive       Boolean           @default(true) @map("is_active")
+  source         MemorySourceType  @default(manual)
+  createdAt      DateTime          @default(now()) @map("created_at")
+  updatedAt      DateTime          @default(now()) @updatedAt @map("updated_at")
+  accessCount    Int               @default(0) @map("access_count")
+  lastAccessedAt DateTime?         @map("last_accessed_at")
+  helpfulCount   Int               @default(0) @map("helpful_count")    // user feedback: marked helpful
+  unhelpfulCount Int               @default(0) @map("unhelpful_count")  // user feedback: marked unhelpful/wrong
+  metadata       Json?
+  embeddingId      String?           @map("embedding_id") @db.VarChar(255)
+  embeddingModel   String?           @map("embedding_model")
+  distillationModel String?          @map("distillation_model")
+  // Store embedding directly if needed, or link to vector store. Design mentions embedding content.
+  // Using unsupported type for vector as per Prisma docs for pgvector if raw needed,
+  // but TypedSQL/Extensions support is evolving. For now, we'll keep the schema clean
+  // or add a specific field if we want to store vectors here.
+  // Design doc mentions "embedding_id", implying external or specific handling.
+  // I will add a vector field assuming we want to use pgvector functionality directly here.
+  orgId          String?           @map("org_id")   // from JWT org_id claim
+  memoryType     String            @default("distilled") @map("memory_type") @db.VarChar(50) // "distilled" | "neuralese"
+  sessionShared  Boolean           @default(false)       @map("session_shared")               // visible across sessions for same user/org
+  embedding      Unsupported("vector")? // dimensionless — supports any embedding model without schema migration
+
+  tags           MemoryTag[]
+  sources        MemorySource[]
+  candidates     ExtractionCandidate[]
+  accessLogs     MemoryAccessLog[]
+
+  // Relations: Source
+  relationsFrom  MemoryRelation[] @relation("SourceMemory")
+  relationsTo    MemoryRelation[] @relation("TargetMemory")
+
+  // Collections
+  collections    CollectionMemory[]
+
+  @@map("memories")
+  @@index([userId, category])
+  @@index([userId, importance])
+  @@index([userId, isActive])
+  @@index([orgId, userId])
+  @@index([createdAt(sort: Desc)])
+  @@index([updatedAt(sort: Desc)])
+  @@index([embeddingId])
+}
+
+enum MemoryCategory {
+  persona
+  preference
+  fact
+  context
+  instruction
+}
+
+enum MemoryImportance {
+  critical
+  high
+  medium
+  low
+}
+
+enum MemorySourceType {
+  manual
+  inferred
+  imported
+}
+
+// -- Memory tags (many-to-many) --
+model MemoryTag {
+  memoryId String @map("memory_id") @db.Uuid
+  tag      String @db.VarChar(100)
+  memory   Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@id([memoryId, tag])
+  @@index([tag])
+  @@map("memory_tags")
+}
+
+// -- Memory sources (link to assignments/messages) --
+model MemorySource {
+  id         String   @id @default(uuid()) @db.Uuid
+  memoryId   String   @map("memory_id") @db.Uuid
+  sourceType String?  @map("source_type") @db.VarChar(50) // 'assignment', 'message', 'manual'
+  sourceId   String?  @map("source_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+  memory     Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([sourceType, sourceId])
+  @@map("memory_sources")
+}
+
+// -- Memory extraction jobs --
+model MemoryExtraction {
+  id             String   @id @default(uuid()) @db.Uuid
+  assignmentId   String?  @map("assignment_id") @db.Uuid
+  status         String?  @db.VarChar(50)
+  extractedCount Int?     @map("extracted_count")
+  savedCount     Int      @default(0) @map("saved_count")
+  createdAt      DateTime @default(now()) @map("created_at")
+  completedAt    DateTime? @map("completed_at")
+  metadata       Json?
+
+  candidates     ExtractionCandidate[]
+
+  @@index([assignmentId])
+  @@map("memory_extractions")
+}
+
+// -- Extracted memory candidates (before user review) --
+model ExtractionCandidate {
+  id              String   @id @default(uuid()) @db.Uuid
+  extractionId    String?  @map("extraction_id") @db.Uuid
+  content         String
+  category        MemoryCategory
+  importance      MemoryImportance
+  confidence      Float
+  suggestedTags   String[] @map("suggested_tags")
+  sourceMessageIds String[] @map("source_message_ids") @db.Uuid
+  saved           Boolean  @default(false)
+  memoryId        String?  @map("memory_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  extraction      MemoryExtraction? @relation(fields: [extractionId], references: [id], onDelete: Cascade)
+  memory          Memory?           @relation(fields: [memoryId], references: [id])
+
+  @@index([extractionId])
+  @@map("extraction_candidates")
+}
+
+// -- Memory access log (for analytics) --
+model MemoryAccessLog {
+  id             String   @id @default(uuid()) @db.Uuid
+  memoryId       String   @map("memory_id") @db.Uuid
+  assignmentId   String?  @map("assignment_id") @db.Uuid
+  relevanceScore Float?   @map("relevance_score")
+  accessedAt     DateTime @default(now()) @map("accessed_at")
+
+  memory         Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([memoryId, accessedAt(sort: Desc)])
+  @@map("memory_access_log")
+}
+
+// -- Collections --
+model Collection {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  
+  memories    CollectionMemory[]
+  
+  @@map("collections")
+}
+
+model CollectionMemory {
+  collectionId String @map("collection_id") @db.Uuid
+  memoryId     String @map("memory_id") @db.Uuid
+  addedAt      DateTime @default(now()) @map("added_at")
+  
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  memory       Memory     @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  
+  @@id([collectionId, memoryId])
+  @@map("collection_memories")
+}
+
+// -- Relations --
+model MemoryRelation {
+  id             String   @id @default(uuid()) @db.Uuid
+  sourceMemoryId String   @map("source_memory_id") @db.Uuid
+  targetMemoryId String   @map("target_memory_id") @db.Uuid
+  relationType   RelationType @map("relation_type")
+  strength       Float?
+  description    String?
+  createdAt      DateTime @default(now()) @map("created_at")
+  
+  sourceMemory   Memory   @relation("SourceMemory", fields: [sourceMemoryId], references: [id], onDelete: Cascade)
+  targetMemory   Memory   @relation("TargetMemory", fields: [targetMemoryId], references: [id], onDelete: Cascade)
+
+  @@map("memory_relations")
+}
+
+enum RelationType {
+  related_to
+  contradicts
+  supersedes
+  supports
+  derives_from
+}
