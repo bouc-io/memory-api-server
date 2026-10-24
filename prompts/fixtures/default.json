@@ -1,0 +1,5 @@
+{
+  "_note": "Frozen inputs for GET /v1/prompts/:id/rendered and the committed goldens. Changing this file changes the rendered output — treat it as test data.",
+  "count": 3,
+  "contents": "1. The user prefers concise answers.\n2. The user asked for shorter replies.\n3. The user said long answers are unhelpful."
+}

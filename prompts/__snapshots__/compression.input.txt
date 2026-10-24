@@ -1,0 +1,4 @@
+Merge these 3 memories into one:
+1. The user prefers concise answers.
+2. The user asked for shorter replies.
+3. The user said long answers are unhelpful.
