@@ -55,7 +55,7 @@
     "prom-client": "^15.1.3",
     "swagger-jsdoc": "^6.3.0",
     "swagger-ui-express": "^5.0.1",
-    "zod": "^3.22.4"
+    "zod": "^4.6.6"
   },
   "ts-node": {
     "esm": false,
